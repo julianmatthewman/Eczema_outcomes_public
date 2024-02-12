@@ -1,4 +1,5 @@
 # Code and codelists for "Cohort studies on 71 different adverse health outcomes among people with atopic eczema in UK primary care data"
+[![DOI](https://zenodo.org/badge/755941643.svg)](https://zenodo.org/doi/10.5281/zenodo.10649715)
 
 ## How to run
 
