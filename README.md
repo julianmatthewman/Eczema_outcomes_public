@@ -16,6 +16,10 @@
 
 No real data is provided in this repository. CPRD Aurum data is provided via a 2-step process: First, the codes from the relevant codelist need to be provided to *define* a cohort of exposed individuals (the files are created as **[...]\_codes_for_define.txt**). Second, a list of patids needs to be provided to *extract* all data for these individuals (the list of patids is created as **patids_for_extract.txt**).
 
+## Typical run time and hardware requirements
+
+With dummy data the pipeline takes approximately 5 minutes to complete on a normal (ca 2023) desktop or laptop computer. With real CPRD Aurum data, the pipeline may take more than 1 week to complete when branches are not run in parallel. Approximately 64 GB of RAM are required.
+
 ## Files
 
 | File                                   | Purpose                                                                                                        |
