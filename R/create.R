@@ -276,3 +276,19 @@ create_pre_index_drug_vars <- function(cohort, drug_eventdata, drug_codelists) {
 	
 }
 
+
+alg_cons_in_year_pre_index <- function(cohort_matched, obs_dates_unique) {
+  
+	temp <- cohort_matched[c("patid", "exposed", "indexdate")] |> 
+		left_join(obs_dates_unique, by="patid") |> 
+		fgroup_by(patid, exposed) |> 
+		fsummarise(cons_in_year_pre_index=any(as.integer(indexdate)-as.integer(obsdate)<365.25 &
+							as.integer(indexdate)-as.integer(obsdate)>=0, na.rm=TRUE))
+		
+  
+	cohort_matched[c("patid", "exposed")] |> 
+    left_join(temp, by=c("patid", "exposed")) |> 
+    fselect(cons_in_year_pre_index)
+  
+}
+

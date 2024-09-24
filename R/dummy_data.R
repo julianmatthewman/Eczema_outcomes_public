@@ -105,6 +105,26 @@ tibble(
 	hes_apc_e=1, ons_death_e=1, lsoa_e=1, sgss_e=1, chess_e=1, hes_op_e=1, hes_ae_e=1, hes_did_e=1, cr_e=1, sact_e=1, rtds_e=1, mhds_e=1, icnarc_e=1
 ) |> write_dta(paste0("dummy_data/linkage/", "Aurum_enhanced_eligibility_January_2022.dta"))
 
+# Make dummy ONS death
+tibble(
+	patid=patids,
+	dod=format(rsample(daterange_w_nas, n), "%d/%m/%Y")
+) |> write_tsv(paste0("dummy_data/linked_data/", "death_patient_23_002665_DM.txt"))
+
+tibble(
+	patid=patids,
+	pracid=NA,
+	e2019_imd_5=rsample(1:5, n_patids)
+) |> write_tsv(paste0("dummy_data/linked_data/", "patient_2019_imd_23_002665.txt"))
+
+tibble(
+	pracid=patids,
+	country="England",
+	e2019_imd_5=rsample(1:5, n_patids),
+	ni2017_imd_5=rsample(1:5, n_patids),
+	s2020_imd_5=rsample(1:5, n_patids),
+	w2019_imd_5=rsample(1:5, n_patids)
+) |> write_tsv(paste0("dummy_data/linked_data/", "practice_imd_23_002665.txt"))
 
 
 TRUE
@@ -135,7 +155,7 @@ make_dummy_extract_aurum <- function(codelists, cohort, outcome, n=200000) {
 	
 	
 	
-	# Process codes -----------------------------------------------------------
+	# Process MedCodes -----------------------------------------------------------
 	
 	#Make lists of all medcodes and prodcodes
 	medcodes <- codelists$codes[which(codelists$codevar=="MedCodeId")]
@@ -149,6 +169,28 @@ make_dummy_extract_aurum <- function(codelists, cohort, outcome, n=200000) {
 	#Make medcodes that sample evenly (make a sample of each code that is the length of the longest codelist)
 	longest_codelist_length <- max(map_int(c(medcodes), length))
 	medcodes_even <- unlist(map(medcodes, sample, size=longest_codelist_length, replace=TRUE), use.names = FALSE)
+	
+	# Process ICD codes -----------------------------------------------------------
+	
+	#Make lists of all medcodes and prodcodes
+icdcodes <- c(
+  codelists$icd_codes[which(codelists$codevar == "MedCodeId")],
+  list(c("L20", "L20.0", "L20.8", "L20.9")) #ICD codes for eczema
+)
+
+	
+	# Remove items with NA
+	icdcodes <- icdcodes[map_lgl(icdcodes, \(x) !is_empty(x))]
+	
+	#If there is only one code then duplicate it to avoid downstream issues with sampling (since sample with an element of length 1 is different than with an element length >1)
+	icdcodes[which(map(icdcodes, length)==1)] <- map(icdcodes[which(map(icdcodes, length)==1)], ~c(.x, .x))
+	
+	#Make vectors of all outcome codes
+	outcomes_icd <- unlist(codelists$icd_codes[which(codelists$name %in% outcomes & codelists$codevar=="MedCodeId")], use.names = FALSE)
+	
+	#Make medcodes that sample evenly (make a sample of each code that is the length of the longest codelist)
+	longest_codelist_length_icd <- max(map_int(c(icdcodes), length))
+	icdcodes_even <- unlist(map(icdcodes, sample, size=longest_codelist_length_icd, replace=TRUE), use.names = FALSE)
 	
 	
 	# Make dummy data ---------------------------------------------------------
@@ -171,6 +213,25 @@ make_dummy_extract_aurum <- function(codelists, cohort, outcome, n=200000) {
 			}
 		}
 	}
+	
+	# Make dummy HES data
+	tibble(
+		patid=rsample(patids, n),
+		spno=1:n,     
+		epikey=1:n, 
+		epistart=format(rsample(daterange_head, n), "%d/%m/%Y"),
+		epiend=format(rsample(daterange_head, n), "%d/%m/%Y"),  
+		ICD=rsample(icdcodes_even, n),  
+		ICDx=""
+	) |> 
+		write_parquet(paste0("dummy_data/linked_data/", "hes_diagnosis_epi_23_002665_DM.parquet"))
+	
+	# Make dummy ONS death data
+	tibble(
+		patid=sample(patids, n/100),
+		dod=format(rsample(daterange, n/100), "%d/%m/%Y"),
+	) |> 
+		write_tsv(paste0("dummy_data/linked_data/", "death_patient_23_002665_DM.txt"))
 	
 	TRUE
 }

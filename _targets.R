@@ -15,12 +15,12 @@ sapply(list.files("R", full.names = TRUE), source, .GlobalEnv)
 
 # Distributed Computing ---------------------------------------------------
 # Enable the controller in tar_options_set to run targets in parallel
-# controller <- crew::crew_controller_local(
-# 	name = "my_controller",
-# 	workers = 1,
-# 	seconds_idle = 10,
-# 	launch_max = 10000
-# )
+controller <- crew::crew_controller_local(
+	name = "my_controller",
+	workers = 3,
+	seconds_idle = 10,
+	launch_max = 10000
+)
 # 
 # tar_config_set(
 # 	seconds_meta_append = 15,
@@ -29,10 +29,10 @@ sapply(list.files("R", full.names = TRUE), source, .GlobalEnv)
 
 # Set target-specific options such as packages.
 tar_option_set(
-	# controller = controller,
-	# storage = "worker", retrieval = "worker",
-	# memory = "transient", garbage_collection = TRUE,
-	# error = "continue",
+controller = controller,
+	storage = "worker", retrieval = "worker",
+	memory = "transient", garbage_collection = TRUE,
+	error = "null",
 	# workspace_on_error = TRUE, # Save a workspace file for a target that errors out.
 	packages = c(
 		"arrow", #For reading parquet files
@@ -55,7 +55,7 @@ list(
 	# Specifications -------------------------------------------------------------
 	
 	tar_target(exposure, "exposed"),
-	tar_target(exclusion, c("outcome before indexdate")),
+	tar_target(exclusion, c("outcome before indexdate", "consultation in year before indexdate")),
 	
 	# ┠ Models -----
 	tar_target(# Specify models for regression
@@ -64,6 +64,14 @@ list(
 				 	"A" = paste(c("", outcome), collapse = " + "),
 				 	"B" = paste(c("", outcome, drugs), collapse = " + ")
 				 )
+	),
+	
+	# ┠ Models -----
+	tar_target(# Specify models for regression
+		model_time_updated, 
+		c("A" = paste(c("", outcome), collapse = " + "),
+			"H" = paste(c("", "hospital", outcome), collapse = " + ")
+		)
 	),
 	
 	# ┠ Study dates -----
@@ -81,9 +89,10 @@ list(
 	tar_target(aurum_product, haven::read_dta(paste0(path_codebrowsers, "CPRDAurumProduct.dta"))),
 	
 	# Denominator, define and extract
-	tar_file(denominator_file, if(dummy_define) path_denominator),
+	tar_target(denominator_file, if(dummy_define) path_denominator),
 	tar_target(define_obs_files, if(dummy_define) dir(path_define, pattern = "Define_Inc1_Observation.*\\.parquet", full.names = TRUE)),
 	tar_target(define_drug_files, if(dummy_define) dir(path_define, pattern = "Define_Inc1_Drug.*\\.parquet", full.names = TRUE)),
+	tar_target(define_non_disease_files, if(dummy_define) dir(path_define, pattern = "Define_Inc1_Observation.*\\.parquet", full.names = TRUE)),
 	tar_target(files, if(dummy_extract) dir(path_extract, pattern = ".parquet", full.names = TRUE)),
 	
 	# HES eligibility
@@ -115,6 +124,13 @@ list(
 	tar_target(
 		drug_codelists,
 		codelists_for_define[which(codelists_for_define$name %in% c("oral_glucocorticoids", "systemic_immunosupressants")),]
+	),
+	tar_target(
+		non_disease_codelist,
+		tribble(~name, ~codevar, ~extract_from, "non_disease",	"MedCodeId",	"observation") |> 
+mutate(path=paste0("codelists/Aurum/", codevar, "/", name, " codelist.csv"),
+			 full=map(path, ~read_csv(.x, col_types = cols(.default = "c"))),
+			 codes=map2(path, codevar, ~read_csv(.x, , col_types = cols(.default = "c"))[[.y]]))
 	),
 	tar_target(drugs, drug_codelists$name),
 
@@ -200,7 +216,10 @@ list(
 			mutate(path=paste0("codelists/Aurum/", codevar, "/", name, " codelist.csv"),
 						 full=map(path, ~read_csv(.x, col_types = cols(.default = "c"))),
 						 codes=map2(path, codevar, ~read_csv(.x, col_types = cols(.default = "c"))[[.y]]),
-						 sum_obs=map_vec(full, \(x) x |> pull(any_of(c("Observations", "DrugIssues"))) |> as.numeric() |> sum()))
+						 sum_obs=map_vec(full, \(x) x |> pull(any_of(c("Observations", "DrugIssues"))) |> as.numeric() |> sum()),
+						 icd_path=paste0("codelists/HES/", name, " icd-10 codelist.csv"),
+						 icd_full=map(icd_path, ~read_csv(.x, col_types = cols(.default = "c"))),
+						 icd_codes=map2(icd_path, "code", ~read_csv(.x, col_types = cols(.default = "c"))[[.y]]))
 	),
 	tar_target(outcome, codelists$name),
 	tar_target(n_outcomes, length(outcome)),
@@ -241,9 +260,26 @@ list(
 						 format = "parquet"),
 	
 	tar_target(exposed_drug_defined, open_dataset(define_drug_files) |> 
-						 	select(patid, prodcodeid, issuedate) |> collect() |> 
+						 	select(patid, prodcodeid, issuedate, dosageid, quantity, quantunitid, duration) |> collect() |> 
 						 	mutate(issuedate=as.Date(issuedate, "%d/%m/%Y")),
 						 format = "parquet"),
+	
+	# ┠ Read linked data -----------------------------------------------
+	tar_target(hes_diagnosis, if(dummy_define) read_parquet(paste0(path_linked_data, "hes_diagnosis_epi_23_002665_DM.parquet"))),
+	tar_target(hes_diagnosis_eczema, 
+		hes_diagnosis |> 
+		fsubset(ICD %in% c("L20", "L20.0", "L20.8", "L20.9")) |> 
+		mutate(epistart=as.Date(epistart, "%d/%m/%Y"))
+	),
+tar_target(
+	hes_dates_all,
+	hes_diagnosis |> fselect(patid, epistart) |> funique.data.frame() |> ftransform(epistart=as.Date(epistart, "%d/%m/%Y"))
+),
+	tar_target(ons_death, if(dummy_define) read_tsv_arrow(paste0(path_linked_data, "death_patient_23_002665_DM.txt"), schema = schema(patid=string(), dod=string()), skip = 1)),
+	tar_target(imd_patient, if(dummy_define) read_tsv_arrow(paste0(path_linked_data, "patient_2019_imd_23_002665.txt"), schema = schema(patid=string(), pracid=int64(), e2019_imd_5=int64()), skip = 1)),
+	tar_target(imd_practice, if(dummy_extract) read_tsv_arrow(paste0(path_linked_data, "practice_imd_23_002665.txt"))),
+	
+	
 	
 	# ┠ Define Exposed ------------------------------------------------
 	
@@ -273,6 +309,13 @@ list(
 		format = "parquet"
 	),
 	tar_target(
+		cohort_eczema_children,
+		yobs |> 
+			left_join(cohort_eczema_all, by="patid") |> 
+			fsubset(exposed_date < as.Date(paste0(yob+18, "-06-01")), -yob),
+		format = "parquet"
+	),
+	tar_target(
 		cohort_mod_sev_eczema,
 		define_cohort_mod_sev_eczema(cohort_eczema_all,
 																 codelists_for_define,
@@ -284,10 +327,10 @@ list(
 	),
 	
 	tar_target(cohort_defined,
-						 list(cohort_eczema_all, cohort_eczema_adults, cohort_eczema_older_adults, cohort_mod_sev_eczema),
+						 list(cohort_eczema_all, cohort_eczema_adults, cohort_eczema_older_adults, cohort_mod_sev_eczema, cohort_eczema_children),
 						 iteration = "list"),
 	tar_target(cohort_defined_labels,
-						 c("eczema_all", "eczema_18", "eczema_40", "mod_sev_eczema_all")),
+						 c("eczema_all", "eczema_18", "eczema_40", "mod_sev_eczema_all", "eczema_child")),
 	
 	
 	# ┠ Create Cohort ------------------------------------------------------------
@@ -368,9 +411,33 @@ list(
 		format = "parquet",
 	),
 	tar_target(
+		obs_dates,
+		open_dataset(define_non_disease_files) |> 
+			filter(medcodeid %in% unlist(non_disease_codelist$codes)) |> 
+			filter(patid %in% patids_from_all_cohorts) |> 
+			select(patid, obsdate) |> 
+			distinct() |> 
+			mutate(obsdate=as.Date(obsdate, "%d/%m/%Y")) |> 
+			collect(),
+		pattern = define_non_disease_files,
+		format = "parquet"
+	),
+tar_target(
+	obs_dates_unique,
+	funique.data.frame(obs_dates),
+	format = "parquet"
+),
+	tar_target(
+		cons_in_year_pre_index,
+		alg_cons_in_year_pre_index(cohort_matched, obs_dates_unique),
+		pattern = cohort_matched,
+		iteration = "list",
+		format = "parquet",
+	),	
+	tar_target(
 		cohort_wide,
-		bind_cols(cohort_matched, pre_index_vars, drug_vars),
-		pattern = map(cohort_matched, pre_index_vars, drug_vars),
+		bind_cols(cohort_matched, pre_index_vars, drug_vars, cons_in_year_pre_index),
+		pattern = map(cohort_matched, pre_index_vars, drug_vars, cons_in_year_pre_index),
 		iteration = "list",
 		format = "parquet"
 	),
@@ -383,7 +450,9 @@ list(
 	tar_target(
 		results,
 		analysis_results(outcome, eventdata, cohort_wide, cohort_defined_labels, exclusion, exposure, model, n_outcomes),
-		pattern = cross(map(outcome, eventdata), map(cohort_wide, cohort_defined_labels), exclusion),
+		pattern = slice(
+			cross(map(outcome, eventdata), map(cohort_wide, cohort_defined_labels), exclusion),
+			c(1,2,3,5,7,9,11,12,13,15,17,19,21,22,23,25,27,29,31,32,33,35,37,39,41,42,43,45,47,49,51,52,53,55,57,59,61,62,63,65,67,69,71,72,73,75,77,79,81,82,83,85,87,89,91,93,94,95,97,99,101,103,104,105,107,109,111,112,113,115,117,119,121,122,123,125,127,129,131,133,134,135,137,139,141,143,144,145,147,149,151,153,154,155,157,159,161,163,164,165,167,169,171,173,174,175,177,179,181,183,184,185,187,189,191,193,194,195,197,199,201,202,203,205,207,209,211,212,213,215,217,219,221,222,223,225,227,229,231,232,233,235,237,239,241,243,244,245,247,249,251,253,254,255,257,259,261,263,264,265,267,269,271,273,274,275,277,279,281,283,284,285,287,289,291,292,293,295,297,299,301,302,303,305,307,309,311,312,313,315,317,319,321,322,323,325,327,329,331,332,333,335,337,339,341,343,344,345,347,349,351,353,354,355,357,359,361,363,365,366,367,369,371,373,374,375,377,379,381,382,383,385,387,389,391,392,393,395,397,399,401,402,403,405,407,409,411,412,413,415,417,419,421,422,423,425,427,429,431,432,433,435,437,439,441,443,445,446,447,449,451,453,455,456,457,459,461,462,463,465,467,469,471,472,473,475,477,479,481,482,483,485,487,489,491,493,494,495,497,499,501,502,503,505,507,509,511,512,513,515,517,519,521,522,523,525,527,529,531,533,534,535,537,539,541,542,543,545,547,549,551,552,553,555,557,559,561,562,563,565,567,569,571,572,573,575,577,579,581,583,584,585,587,589,591,593,594,595,597,599,601,602,603,605,607,609,611,612,613,615,617,619,621,622,623,625,627,629,631,632,633,635,637,639,641,642,643,645,647,649,651,652,653,655,657,659,661,662,663,665,667,669,671,673,674,675,677,679,681,683,685,686,687,689,691,693,694,695,697,699,701,703,705,706,707,709)),
 		format = "parquet"
 	),
 	
@@ -410,8 +479,31 @@ list(
 			as_tibble() |> 
 			mutate(cohort=cohort_defined_labels),
 		pattern = map(cohort_wide, cohort_defined_labels),
-		iteration = "vector"
+		iteration = "vector",
 	),
+tar_target(
+	age_dist,
+	cohort_wide[c("patid", "exposed", "indexdate")] |>
+		fsubset(exposed==1) |> 
+		join(denominator[c("patid", "yob")], on="patid", how="left", multiple=FALSE) |> 
+		ftransform(age_at_index=year(indexdate)-yob) |>
+		fcount(age_at_index) |> 
+		roworder(age_at_index) |> 
+		mutate(cohort=cohort_defined_labels),
+	pattern = map(cohort_wide, cohort_defined_labels)
+),
+tar_target(
+	fu_dist,
+	cohort_wide[c("patid", "exposed", "indexdate", "enddate")] |>
+		fsubset(exposed==1) |> 
+		ftransform(indexdate_num=as.numeric(indexdate)) |> 
+		ftransform(enddate_num=as.numeric(enddate)) |> 
+		ftransform(futime_baseline=(enddate_num-indexdate_num)/365.25) |> 
+		fcount(futime_baseline) |> 
+		roworder(futime_baseline) |> 
+		mutate(cohort=cohort_defined_labels),
+	pattern = map(cohort_wide, cohort_defined_labels)
+),
 	
 	
 	# ┠ Time-updated variables --------------------------------------------------
@@ -425,7 +517,7 @@ list(
 	),
 	tar_target(
 		time_updated_vars,
-		time_updated_vars_spec$algorithm[[1]](exposed_obs_defined, exposed_drug_defined, codelists_for_define),
+		time_updated_vars_spec$algorithm[[1]](exposed_obs_defined, exposed_drug_defined, codelists_for_define, hes_diagnosis_eczema),
 		pattern = map(time_updated_vars_spec),
 		iteration = "list",
 		format = "parquet"
@@ -433,20 +525,31 @@ list(
 	
 	# ┠ Time-updated cohort -----------------------------------------------------
 
-	tar_target( # Manually defined slices here to only run on main cohort for each outcome
-		results_time_updated,
-		analysis_time_updated_results(outcome, eventdata, cohort_wide, cohort_defined_labels, exclusion, exposure, model, n_outcomes, time_updated_vars, time_updated_vars_spec),
-		pattern = slice(cross(map(outcome, eventdata), map(cohort_wide, cohort_defined_labels), exclusion), 
-										c(1,5,9,13,17,21,25,29,33,38,42,45,49,54,58,62,66,70,74,78,81,85,89,93,98,102,106,110,114,117,121,125,129,133,138,142,147,150,153,157,161,165,169,173,179,183,185,189,193,198,201,205,209,214,217,221,225,229,234,238,241,245,249,253,257,261,265,270,275,278,283))
-	),
-	
-	tar_target( #Results just for food_allergy; for some reason this get's dropped from the above target
-		results_time_updated_food,
-		analysis_time_updated_results(outcome, eventdata, cohort_wide, cohort_defined_labels, exclusion, exposure, model, n_outcomes, time_updated_vars, time_updated_vars_spec),
-		pattern = slice(cross(map(outcome, eventdata), map(cohort_wide, cohort_defined_labels), exclusion), c(5))
-	),
-	tar_target(results_time_updated_fixed, bind_rows(results_time_updated, results_time_updated_food)),
-	
+
+tar_target(
+	cohort_long,
+	create_cohort_long(outcome, eventdata, cohort_wide, cohort_defined_labels, exclusion, n_outcomes, time_updated_vars, time_updated_vars_spec, hes_eligible_patids, hes_dates_all),
+	pattern = slice(cross(map(outcome, eventdata), map(cohort_wide, cohort_defined_labels), exclusion), 
+	c(1,11,21,31,41,51,61,71,81,93,103,111,121,133,143,153,163,173,183,193,201,211,221,231,243,253,263,273,283,291,301,311,321,331,343,353,365,373,381,391,401,411,421,431,445,455,461,471,481,493,501,511,521,533,541,551,561,571,583,593,601,611,621,631,641,651,661,673,685,693,705)),
+	format = "parquet",
+	iteration = "list"
+),
+
+
+tar_target(
+	results_long,
+	analysis_long(outcome, cohort_long, cohort_defined_labels, exclusion, exposure, model_time_updated, n_outcomes),
+	pattern = cross(
+		model_time_updated,
+		map(cohort_long,
+				slice(cross(
+					outcome, 
+					cohort_defined_labels, 
+					exclusion
+				), c(1,11,21,31,41,51,61,71,81,93,103,111,121,133,143,153,163,173,183,193,201,211,221,231,243,253,263,273,283,291,301,311,321,331,343,353,365,373,381,391,401,411,421,431,445,455,461,471,481,493,501,511,521,533,541,551,561,571,583,593,601,611,621,631,641,651,661,673,685,693,705)))
+	)
+),
+
 	# ┠ Checks ------------------------------------------------------------------
 	
 	tar_target( #Make lists of the most common codes for each eventdata
@@ -495,6 +598,8 @@ list(
 	#Codelists as single line for define
 	tar_target(psoriasis_medcodes_for_define, codelists_for_define |> filter(name=="psoriasis") |> pull(codes) |> unlist()),
 	tar_file(psoriasis_medcodes_for_define_file, write_single_line_and_return_path(psoriasis_medcodes_for_define)),
+	tar_target(non_diseases_medcodes_for_define, non_disease_codelist |> pull(codes) |> unlist()),
+	tar_file(non_diseases_medcodes_for_define_file, write_single_line_and_return_path(non_diseases_medcodes_for_define)),
 	tar_target(eczema_medcodes_for_define, codelists_for_define |> filter(name=="eczema") |> pull(codes) |> unlist()),
 	tar_file(eczema_medcodes_for_define_file, write_single_line_and_return_path(eczema_medcodes_for_define)),
 	tar_target(phototherapy_medcodes_for_define, codelists_for_define |> filter(name=="phototherapy") |> pull(codes) |> unlist()),
@@ -529,7 +634,7 @@ list(
 	# ┠ for Linkage----------------------------------------------------
 	tar_target(hes_eligible_patids, hes_eligibility |> filter(hes_apc_e==1 & ons_death_e==1) |> pull(patid) |> as.character()),
 	tar_target(hes_eligible_pats, patids_for_extract_unique |> 
-						 	join(hes_eligibility, on="patid") |> 
+						 	left_join(hes_eligibility, by="patid") |> 
 						 	fselect(patid, hes_apc_e, ons_death_e, lsoa_e) |> 
 						 	fsubset(hes_apc_e==1) |> 
 						 	fsubset(ons_death_e==1)),
@@ -541,12 +646,13 @@ list(
 	
 	#Tables as .csv
 	tar_file(results_file, write_and_return_path(results)),
-	tar_file(results_time_updated_file, write_and_return_path(results_time_updated)),
-	tar_file(results_time_updated_fixed_file, write_and_return_path(results_time_updated_fixed)),
+  tar_file(results_long_file, write_and_return_path(results_long)),
 	tar_file(common_codes_file, write_and_return_path(common_codes)),
 	tar_file(cohort_flow_file, write_and_return_path(cohort_flow)),
 	tar_file(baseline_chars_file, write_and_return_path(baseline_chars)),
-	
+tar_file(age_dist_file, write_and_return_path(age_dist)),
+tar_file(fu_dist_file, write_and_return_path(fu_dist)),
+
 	#Vectors as text
 	tar_file(exposure_file, write_lines_and_return_path(exposure)),
 	tar_file(outcome_file, write_lines_and_return_path(outcome)),
