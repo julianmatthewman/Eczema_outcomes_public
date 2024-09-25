@@ -125,7 +125,18 @@ tibble(
 	s2020_imd_5=rsample(1:5, n_patids),
 	w2019_imd_5=rsample(1:5, n_patids)
 ) |> write_tsv(paste0("dummy_data/linked_data/", "practice_imd_23_002665.txt"))
-
+	
+# Make dummy HES data
+tibble(
+  patid = rsample(patids, n),
+  spno = 1:n,
+  epikey = 1:n,
+  epistart = format(rsample(daterange_head, n), "%d/%m/%Y"),
+  epiend = format(rsample(daterange_head, n), "%d/%m/%Y"),
+  ICD = rsample(c("L20", "L20.0", "L20.8", "L20.9"), n),
+  ICDx = ""
+) |>
+  write_parquet(paste0("dummy_data/linked_data/", "hes_diagnosis_epi_23_002665_DM.parquet"))
 
 TRUE
 }
